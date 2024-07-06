@@ -25,6 +25,7 @@ from bpy.types import (
     Object,
     PoseBone,
     ShaderNodeTexImage,
+    ShapeKey,
 )
 from mathutils import Matrix, Vector
 
@@ -127,6 +128,7 @@ class Vrm0Exporter(AbstractBaseVrmExporter):
             with (
                 save_workspace(self.context),
                 self.setup_armature(),
+                self.clear_shape_key_values() as mesh_name_and_shape_key_name_to_value,
                 self.clear_blend_shape_proxy_previews(self.armature_data),
                 self.hide_mtoon1_outline_geometry_nodes(self.context),
                 self.setup_pose(
@@ -144,7 +146,7 @@ class Vrm0Exporter(AbstractBaseVrmExporter):
                 wm.progress_update(4)
                 # 内部でcontext.view_layer.objects.active = meshをするので復元する
                 with save_workspace(self.context):
-                    self.mesh_to_bin_and_dict()
+                    self.mesh_to_bin_and_dict(mesh_name_and_shape_key_name_to_value)
                 wm.progress_update(5)
                 self.json_dict["scene"] = 0
                 self.gltf_meta_to_dict()
@@ -190,6 +192,41 @@ class Vrm0Exporter(AbstractBaseVrmExporter):
         finally:
             if use_dummy_armature:
                 self.context.blend_data.objects.remove(self.armature, do_unlink=True)
+
+    @contextmanager
+    def clear_shape_key_values(self) -> Iterator[dict[tuple[str, str], float]]:
+        mesh_name_and_shape_key_name_to_value: dict[tuple[str, str], float] = {}
+        mesh_objs = [obj for obj in self.export_objects if obj.type == "MESH"]
+        for mesh_obj in mesh_objs:
+            mesh = mesh_obj.data
+            if not isinstance(mesh, Mesh):
+                continue
+            shape_keys = mesh.shape_keys
+            if not shape_keys:
+                continue
+            key_block: Optional[ShapeKey] = None
+            for key_block in shape_keys.key_blocks:
+                mesh_name_and_shape_key_name_to_value[(mesh.name, key_block.name)] = (
+                    key_block.value
+                )
+                key_block.value = 0
+        try:
+            yield mesh_name_and_shape_key_name_to_value
+        finally:
+            for (
+                mesh_name,
+                shape_key_name,
+            ), value in mesh_name_and_shape_key_name_to_value.items():
+                mesh = self.context.blend_data.meshes.get(mesh_name)
+                if not mesh:
+                    continue
+                shape_keys = mesh.shape_keys
+                if not shape_keys:
+                    continue
+                key_block = shape_keys.key_blocks.get(shape_key_name)
+                if not key_block:
+                    continue
+                key_block.value = value
 
     def image_to_bin(self) -> None:
         # collect used image
@@ -2111,7 +2148,9 @@ class Vrm0Exporter(AbstractBaseVrmExporter):
             )
         return polys
 
-    def mesh_to_bin_and_dict(self) -> None:
+    def mesh_to_bin_and_dict(
+        self, _mesh_name_and_shape_key_name_to_value: dict[tuple[str, str], float]
+    ) -> None:
         mesh_dicts = self.json_dict.get("meshes")
         if not isinstance(mesh_dicts, list):
             mesh_dicts = []
@@ -2122,11 +2161,14 @@ class Vrm0Exporter(AbstractBaseVrmExporter):
             for obj in self.export_objects
             if obj.type in search.MESH_CONVERTIBLE_OBJECT_TYPES
         ]
+
+        # メッシュを親子関係に従ってソート
         while True:
             swapped = False
             for mesh in list(meshes):
                 if (
                     mesh.parent_type == "OBJECT"
+                    # TODO: 本来なら再帰的に親を探索するべき
                     and mesh.parent
                     and mesh.parent.type in search.MESH_CONVERTIBLE_OBJECT_TYPES
                     and meshes.index(mesh) < meshes.index(mesh.parent)
