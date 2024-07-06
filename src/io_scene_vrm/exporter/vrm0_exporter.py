@@ -210,6 +210,7 @@ class Vrm0Exporter(AbstractBaseVrmExporter):
                     key_block.value
                 )
                 key_block.value = 0
+        self.context.view_layer.update()
         try:
             yield mesh_name_and_shape_key_name_to_value
         finally:
@@ -2450,18 +2451,19 @@ class Vrm0Exporter(AbstractBaseVrmExporter):
                             float_pair_packer(uv[0], 1 - uv[1])
                         )  # blenderとglbのuvは上下逆
                     if mesh_data.shape_keys is not None:
+                        co_x, co_y, co_z = mesh_data.vertices[loop.vertex_index].co
                         for shape_name in shape_name_to_pos_bin_dict:
-                            co = mesh_data.vertices[loop.vertex_index].co
-                            shape_co = (
-                                mesh_data.shape_keys.key_blocks[shape_name]
-                                .data[loop.vertex_index]
-                                .co
-                            )
+                            key_block = mesh_data.shape_keys.key_blocks[shape_name]
+                            key_block.value = 1
+                            self.context.view_layer.update()
+                            shape_co_x, shape_co_y, shape_co_z = key_block.data[loop.vertex_index].co
+                            key_block.value = 0
+                            self.context.view_layer.update()
                             morph_pos = self.axis_blender_to_glb(
                                 (
-                                    shape_co[0] - co[0],
-                                    shape_co[1] - co[1],
-                                    shape_co[2] - co[2],
+                                    shape_co_x - co_x,
+                                    shape_co_y - co_y,
+                                    shape_co_z - co_z,
                                 )
                             )
                             shape_name_to_pos_bin_dict[shape_name].extend(
