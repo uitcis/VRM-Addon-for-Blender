@@ -1972,9 +1972,6 @@ class Mtoon1BaseColorTextureInfoPropertyGroup(Mtoon1TextureInfoPropertyGroup):
                 node_group_node_tree_name=shader.OUTPUT_GROUP_NAME,
                 in_socket_name="Lit Color Texture Alpha",
             ),
-            PrincipledBsdfNodeSocketTarget(
-                in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
-            ),
         ],
     }
 
@@ -3119,6 +3116,16 @@ class Mtoon1MaterialPropertyGroup(MaterialTraceablePropertyGroup):
             return alpha_mode_value
         return self.ALPHA_MODE_OPAQUE_VALUE
 
+    @staticmethod
+    def update_alpha_nodes(material: Material) -> None:
+        # TextureTraceablePropertyGroup.unlink_tex_image_from_node_group(
+        #     material,
+        #     shader.OUTPUT_GROUP_NAME,
+        #     shader.OUTPUT_GROUP_ALPHA_MODE_LABEL,
+        #     NodeSocketTarget()
+        # )
+        pass
+
     def set_alpha_mode(self, value: int) -> None:
         changed = self.get_alpha_mode() != value
 
@@ -3160,6 +3167,8 @@ class Mtoon1MaterialPropertyGroup(MaterialTraceablePropertyGroup):
 
         if shadow_method is not None:
             material.shadow_method = shadow_method
+
+        Mtoon1MaterialPropertyGroup.update_alpha_nodes(material)
 
         outline_material = get_material_mtoon1_extension(material).outline_material
         if not outline_material:
