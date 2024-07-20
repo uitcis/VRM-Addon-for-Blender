@@ -3117,14 +3117,81 @@ class Mtoon1MaterialPropertyGroup(MaterialTraceablePropertyGroup):
         return self.ALPHA_MODE_OPAQUE_VALUE
 
     @staticmethod
-    def update_alpha_nodes(material: Material) -> None:
+    def update_alpha_nodes(material: Material, alpha_mode_value: int) -> None:
+        node_tree = material.node_tree
+        if not node_tree:
+            return
+
+        # glTFのノードに合わせる
+        # https://docs.blender.org/manual/en/4.2/addons/import_export/scene_gltf2.html#alpha-modes
+        mtoon1 = get_material_mtoon1_extension(material)
+        texture = mtoon1.pbr_metallic_roughness.base_color_texture.index
+        tex_image_node_name = texture.get_image_texture_node_name()
+
+        if alpha_mode_value != Mtoon1MaterialPropertyGroup.ALPHA_MODE_MASK_VALUE:
+            TextureTraceablePropertyGroup.unlink_tex_image_from_node_group(
+                material,
+                tex_image_node_name,
+                TEX_IMAGE_ALPHA_OUTPUT_KEY,
+                PrincipledBsdfNodeSocketTarget(
+                    in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
+                ),
+            )
+        if alpha_mode_value != Mtoon1MaterialPropertyGroup.ALPHA_MODE_BLEND_VALUE:
+            TextureTraceablePropertyGroup.unlink_tex_image_from_node_group(
+                material,
+                tex_image_node_name,
+                TEX_IMAGE_ALPHA_OUTPUT_KEY,
+                PrincipledBsdfNodeSocketTarget(
+                    in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
+                ),
+            )
+
+        principled_bsdf = PrincipledBSDFWrapper(material, is_readonly=False)
+        if alpha_mode_value == Mtoon1MaterialPropertyGroup.ALPHA_MODE_OPAQUE_VALUE:
+            principled_bsdf.alpha = 1.0
+        elif alpha_mode_value == Mtoon1MaterialPropertyGroup.ALPHA_MODE_MASK_VALUE:
+            principled_bsdf.alpha = mtoon1.pbr_metallic_roughness.base_color_factor[3]
+            n = principled_bsdf.node_principled_bsdf
+            if n:
+                logger.info("n=%s", n.name)
+        elif alpha_mode_value == Mtoon1MaterialPropertyGroup.ALPHA_MODE_BLEND_VALUE:
+            principled_bsdf.alpha = mtoon1.pbr_metallic_roughness.base_color_factor[3]
+            tex_image_node = node_tree.nodes.get(tex_image_node_name)
+            if isinstance(tex_image_node, ShaderNodeTexImage) and tex_image_node.image:
+                TextureTraceablePropertyGroup.link_tex_image_to_node_group(
+                    material,
+                    tex_image_node_name,
+                    TEX_IMAGE_ALPHA_OUTPUT_KEY,
+                    PrincipledBsdfNodeSocketTarget(
+                        in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
+                    ),
+                )
+
+        # OPAQUEの場合
+        # - 「テクスチャ => Alphaソケット」のリンクを外す
+        # - 「テクスチャ => MASKノード」のリンクを外す
+        # - 「MASKノード => Alphaソケット」のリンクを外す
+        # - Alphaソケットのdefault_valueの値を1に設定
+
+        # MASKの場合
+        # - 「テクスチャ => Alphaソケット」のリンクを外す
+        # - テクスチャがある場合「テクスチャ => MASKノード」のリンクを繋げる
+        # - 「MASKノード => Alphaソケット」のリンクを繋げる
+        # - MASKノードのデフォルト値を設定
+
+        # BLENDの場合
+        # - テクスチャがある場合「テクスチャ => Alphaソケット」のリンクを繋げる
+        # - 「テクスチャ => MASKノード」のリンクを外す
+        # - 「MASKノード => Alphaソケット」のリンクを外す
+        # - Alphaソケットのdefault_valueの値をalpha値に設定
+
         # TextureTraceablePropertyGroup.unlink_tex_image_from_node_group(
         #     material,
         #     shader.OUTPUT_GROUP_NAME,
         #     shader.OUTPUT_GROUP_ALPHA_MODE_LABEL,
         #     NodeSocketTarget()
         # )
-        pass
 
     def set_alpha_mode(self, value: int) -> None:
         changed = self.get_alpha_mode() != value
@@ -3168,7 +3235,7 @@ class Mtoon1MaterialPropertyGroup(MaterialTraceablePropertyGroup):
         if shadow_method is not None:
             material.shadow_method = shadow_method
 
-        Mtoon1MaterialPropertyGroup.update_alpha_nodes(material)
+        Mtoon1MaterialPropertyGroup.update_alpha_nodes(material, value)
 
         outline_material = get_material_mtoon1_extension(material).outline_material
         if not outline_material:
@@ -3682,9 +3749,9 @@ def get_material_mtoon1_extension(material: Material) -> Mtoon1MaterialPropertyG
     return mtoon1
 
 
-UV_ANIMATION_GROUP_FPS_BASE_NODE_NAME: Final = "Scene.Render.FpsBase"
-UV_ANIMATION_GROUP_FPS_NODE_NAME: Final = "Scene.Render.Fps"
-UV_ANIMATION_GROUP_FRAME_CURRENT_NODE_NAME: Final = "Scene.FrameCurrent"
+UV_ANIMATION_GROUP_FPS_BASE_NODE_NAME: Final = "Scene.render.fps_base"
+UV_ANIMATION_GROUP_FPS_NODE_NAME: Final = "Scene.render.fps"
+UV_ANIMATION_GROUP_FRAME_CURRENT_NODE_NAME: Final = "Scene.frame_current"
 
 
 def setup_frame_count_driver(context: Context) -> None:
