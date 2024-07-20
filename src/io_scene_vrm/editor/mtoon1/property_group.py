@@ -30,6 +30,7 @@ from bpy.types import (
     ShaderNodeGroup,
     ShaderNodeNormalMap,
     ShaderNodeTexImage,
+    ShaderNodeValue,
 )
 from bpy_extras.node_shader_utils import PrincipledBSDFWrapper
 from mathutils import Vector
@@ -128,6 +129,25 @@ class PrincipledBsdfNodeSocketTarget(NodeSocketTarget):
         )
 
 
+class StaticNodeSocketTarget(NodeSocketTarget):
+    def __init__(
+        self, *, in_node_name: str, in_node_type: type[Node], in_socket_name: str
+    ) -> None:
+        self.in_node_name = in_node_name
+        self.in_node_type = in_node_type
+        self.in_socket_name = in_socket_name
+
+    def get_in_socket_name(self) -> str:
+        return self.in_socket_name
+
+    def create_node_selector(self, material: Material) -> Callable[[Node], bool]:
+        _ = material
+        return (
+            lambda node: isinstance(node, self.in_node_type)
+            and node.name == self.in_node_name
+        )
+
+
 class PrincipledBsdfNormalMapNodeSocketTarget(NodeSocketTarget):
     def get_in_socket_name(self) -> str:
         return NORMAL_MAP_COLOR_INPUT_KEY
@@ -168,16 +188,17 @@ class NodeGroupSocketTarget(NodeSocketTarget):
     def get_in_socket_name(self) -> str:
         return self.in_socket_name
 
+    def select_node(self, node: Node) -> bool:
+        if not isinstance(node, ShaderNodeGroup):
+            return False
+        node_tree = node.node_tree
+        if not node_tree:
+            return False
+        return node_tree.name == self.node_group_node_tree_name
+
     def create_node_selector(self, material: Material) -> Callable[[Node], bool]:
         _ = material
-        return (
-            lambda node: isinstance(node, ShaderNodeGroup)
-            and (
-                node_tree := node.node_tree,
-                node_tree is not None
-                and node_tree.name == self.node_group_node_tree_name,
-            )[1]
-        )
+        return self.select_node
 
 
 class MaterialTraceablePropertyGroup(PropertyGroup):
@@ -533,11 +554,12 @@ class TextureTraceablePropertyGroup(MaterialTraceablePropertyGroup):
         return self.get_texture_node_name("Uv")
 
     @classmethod
-    def link_tex_image_to_node_group(
+    def link_nodes(
         cls,
         material: Material,
-        tex_image_node_name: str,
-        tex_image_node_socket_name: str,
+        out_node_name: str,
+        out_node_type: type[Node],
+        out_node_socket_name: str,
         node_socket_target: NodeSocketTarget,
     ) -> None:
         if not material.node_tree:
@@ -548,10 +570,10 @@ class TextureTraceablePropertyGroup(MaterialTraceablePropertyGroup):
         if any(
             1
             for link in material.node_tree.links
-            if isinstance(link.from_node, ShaderNodeTexImage)
-            and link.from_node.name == tex_image_node_name
+            if isinstance(link.from_node, out_node_type)
+            and link.from_node.name == out_node_name
             and link.from_socket
-            and link.from_socket.name == tex_image_node_socket_name
+            and link.from_socket.name == out_node_socket_name
             and select_in_node(link.to_node)
             and link.to_socket
             and link.to_socket.name == in_socket_name
@@ -584,24 +606,25 @@ class TextureTraceablePropertyGroup(MaterialTraceablePropertyGroup):
             logger.error("No input socket: %s", in_socket_name)
             return
 
-        out_node = material.node_tree.nodes.get(tex_image_node_name)
-        if not isinstance(out_node, ShaderNodeTexImage):
-            logger.error("No tex image node: %s", tex_image_node_name)
+        out_node = material.node_tree.nodes.get(out_node_name)
+        if not isinstance(out_node, out_node_type):
+            logger.error("No output node: %s", out_node_name)
             return
 
-        out_socket = out_node.outputs.get(tex_image_node_socket_name)
+        out_socket = out_node.outputs.get(out_node_socket_name)
         if not out_socket:
-            logger.error("No tex image node socket: %s", tex_image_node_socket_name)
+            logger.error("No output node socket: %s", out_node_socket_name)
             return
 
         material.node_tree.links.new(in_socket, out_socket)
 
     @classmethod
-    def unlink_tex_image_from_node_group(
+    def unlink_nodes(
         cls,
         material: Material,
-        tex_image_node_name: str,
-        tex_image_node_socket_name: str,
+        out_node_name: str,
+        out_node_type: type[Node],
+        out_node_socket_name: str,
         node_socket_target: NodeSocketTarget,
     ) -> None:
         while True:
@@ -615,10 +638,10 @@ class TextureTraceablePropertyGroup(MaterialTraceablePropertyGroup):
                 (
                     link
                     for link in material.node_tree.links
-                    if isinstance(link.from_node, ShaderNodeTexImage)
-                    and link.from_node.name == tex_image_node_name
+                    if isinstance(link.from_node, out_node_type)
+                    and link.from_node.name == out_node_name
                     and link.from_socket
-                    and link.from_socket.name == tex_image_node_socket_name
+                    and link.from_socket.name == out_node_socket_name
                     and select_in_node(link.to_node)
                     and link.to_socket
                     and link.to_socket.name == in_socket_name
@@ -641,16 +664,18 @@ class TextureTraceablePropertyGroup(MaterialTraceablePropertyGroup):
         link: bool,
     ) -> None:
         if link:
-            cls.link_tex_image_to_node_group(
+            cls.link_nodes(
                 material,
                 tex_image_node_name,
+                ShaderNodeTexImage,
                 tex_image_node_socket_name,
                 node_socket_target,
             )
         else:
-            cls.unlink_tex_image_from_node_group(
+            cls.unlink_nodes(
                 material,
                 tex_image_node_name,
+                ShaderNodeTexImage,
                 tex_image_node_socket_name,
                 node_socket_target,
             )
@@ -3129,18 +3154,34 @@ class Mtoon1MaterialPropertyGroup(MaterialTraceablePropertyGroup):
         tex_image_node_name = texture.get_image_texture_node_name()
 
         if alpha_mode_value != Mtoon1MaterialPropertyGroup.ALPHA_MODE_MASK_VALUE:
-            TextureTraceablePropertyGroup.unlink_tex_image_from_node_group(
+            TextureTraceablePropertyGroup.unlink_nodes(
                 material,
                 tex_image_node_name,
+                ShaderNodeTexImage,
                 TEX_IMAGE_ALPHA_OUTPUT_KEY,
+                StaticNodeSocketTarget(
+                    in_node_name="MASK IN",
+                    in_node_type=ShaderNodeValue,
+                    in_socket_name="Value",
+                ),
+            )
+            TextureTraceablePropertyGroup.unlink_nodes(
+                material,
+                "MASK OUT",
+                ShaderNodeValue,
+                "Value",
                 PrincipledBsdfNodeSocketTarget(
                     in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
                 ),
             )
-        if alpha_mode_value != Mtoon1MaterialPropertyGroup.ALPHA_MODE_BLEND_VALUE:
-            TextureTraceablePropertyGroup.unlink_tex_image_from_node_group(
+        if (
+            alpha_mode_value != Mtoon1MaterialPropertyGroup.ALPHA_MODE_BLEND_VALUE
+            or bpy.app.version < (4, 2)
+        ):
+            TextureTraceablePropertyGroup.unlink_nodes(
                 material,
                 tex_image_node_name,
+                ShaderNodeTexImage,
                 TEX_IMAGE_ALPHA_OUTPUT_KEY,
                 PrincipledBsdfNodeSocketTarget(
                     in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
@@ -3148,20 +3189,56 @@ class Mtoon1MaterialPropertyGroup(MaterialTraceablePropertyGroup):
             )
 
         principled_bsdf = PrincipledBSDFWrapper(material, is_readonly=False)
-        if alpha_mode_value == Mtoon1MaterialPropertyGroup.ALPHA_MODE_OPAQUE_VALUE:
+        if bpy.app.version < (4, 2):
+            principled_bsdf.alpha = mtoon1.pbr_metallic_roughness.base_color_factor[3]
+            tex_image_node = node_tree.nodes.get(tex_image_node_name)
+            if isinstance(tex_image_node, ShaderNodeTexImage) and tex_image_node.image:
+                TextureTraceablePropertyGroup.link_nodes(
+                    material,
+                    tex_image_node_name,
+                    ShaderNodeTexImage,
+                    TEX_IMAGE_ALPHA_OUTPUT_KEY,
+                    PrincipledBsdfNodeSocketTarget(
+                        in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
+                    ),
+                )
+        elif alpha_mode_value == Mtoon1MaterialPropertyGroup.ALPHA_MODE_OPAQUE_VALUE:
             principled_bsdf.alpha = 1.0
         elif alpha_mode_value == Mtoon1MaterialPropertyGroup.ALPHA_MODE_MASK_VALUE:
             principled_bsdf.alpha = mtoon1.pbr_metallic_roughness.base_color_factor[3]
             n = principled_bsdf.node_principled_bsdf
             if n:
                 logger.info("n=%s", n.name)
+            tex_image_node = node_tree.nodes.get(tex_image_node_name)
+            if isinstance(tex_image_node, ShaderNodeTexImage) and tex_image_node.image:
+                TextureTraceablePropertyGroup.link_nodes(
+                    material,
+                    tex_image_node_name,
+                    ShaderNodeTexImage,
+                    TEX_IMAGE_ALPHA_OUTPUT_KEY,
+                    StaticNodeSocketTarget(
+                        in_node_name="MASK IN",
+                        in_node_type=ShaderNodeValue,
+                        in_socket_name="Value",
+                    ),
+                )
+                TextureTraceablePropertyGroup.link_nodes(
+                    material,
+                    "MASK OUT",
+                    ShaderNodeValue,
+                    "Value",
+                    PrincipledBsdfNodeSocketTarget(
+                        in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
+                    ),
+                )
         elif alpha_mode_value == Mtoon1MaterialPropertyGroup.ALPHA_MODE_BLEND_VALUE:
             principled_bsdf.alpha = mtoon1.pbr_metallic_roughness.base_color_factor[3]
             tex_image_node = node_tree.nodes.get(tex_image_node_name)
             if isinstance(tex_image_node, ShaderNodeTexImage) and tex_image_node.image:
-                TextureTraceablePropertyGroup.link_tex_image_to_node_group(
+                TextureTraceablePropertyGroup.link_nodes(
                     material,
                     tex_image_node_name,
+                    ShaderNodeTexImage,
                     TEX_IMAGE_ALPHA_OUTPUT_KEY,
                     PrincipledBsdfNodeSocketTarget(
                         in_socket_name=PRINCIPLED_BSDF_ALPHA_INPUT_KEY
